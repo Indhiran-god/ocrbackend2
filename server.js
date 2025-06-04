@@ -11,64 +11,100 @@ const app = express();
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
-  'https://shaadistoryfrontend.vercel.app'
+  'https://shaadistoryfrontend.vercel.app',
+  'https://your-frontend-app.vercel.app' // Add your actual frontend domain
 ];
 
-// Middleware
-app.use(cors({
+// CORS configuration
+const corsOptions = {
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
-    if (!origin) return callback(null, true);
-    
-    if (allowedOrigins.indexOf(origin) === -1) {
-      const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
-      return callback(new Error(msg), false);
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
     }
-    return callback(null, true);
   },
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
-}));
+  credentials: true,
+  optionsSuccessStatus: 200
+};
 
-app.use(express.json());
+// Middleware
+app.use(cors(corsOptions));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Handle preflight requests
+app.options('*', cors(corsOptions));
 
 // Configure multer for file uploads
 const storage = multer.memoryStorage();
-const upload = multer({ storage });
+const upload = multer({ 
+  storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB
+  }
+});
 
-// OCR Function
+// OCR Function with improved error handling
 async function extractTextFromImage(buffer) {
   const tempFilePath = path.join('/tmp', `ocr-${Date.now()}.png`);
-  fs.writeFileSync(tempFilePath, buffer);
   
   try {
-    const { data: { text } } = await Tesseract.recognize(tempFilePath, "eng");
-    fs.unlinkSync(tempFilePath);
+    fs.writeFileSync(tempFilePath, buffer);
+    
+    const { data: { text } } = await Tesseract.recognize(
+      tempFilePath,
+      'eng',
+      {
+        logger: m => console.log(m),
+        timeout: 20000 // 20 seconds timeout for OCR
+      }
+    );
 
     const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+    
+    // Improved data extraction
     const profile = {
       name: lines[0] || "",
       bio: lines.slice(1, 4).join(" ") || "",
       followers: lines.find(l => l.toLowerCase().includes("followers")) || "",
       following: lines.find(l => l.toLowerCase().includes("following")) || "",
-      guess_location: lines.find(l => l.toLowerCase().includes("india") || l.toLowerCase().includes("city")) || "",
+      guess_location: lines.find(l => 
+        l.toLowerCase().includes("india") || 
+        l.toLowerCase().includes("city") ||
+        l.toLowerCase().includes("location")
+      ) || "",
     };
 
     return profile;
   } catch (error) {
+    console.error('OCR Processing Error:', error);
+    throw new Error('Failed to process image with OCR');
+  } finally {
     if (fs.existsSync(tempFilePath)) {
       fs.unlinkSync(tempFilePath);
     }
-    throw error;
   }
 }
 
-// OCR Upload Route - Added both /upload and /api/upload for compatibility
+// Upload endpoint with better error handling
 app.post(['/upload', '/api/upload'], upload.single('screenshot'), async (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
+      return res.status(400).json({ 
+        success: false,
+        error: 'No file uploaded' 
+      });
+    }
+
+    // Validate file type
+    if (!req.file.mimetype.startsWith('image/')) {
+      return res.status(400).json({
+        success: false,
+        error: 'Only image files are allowed'
+      });
     }
 
     const extractedData = await extractTextFromImage(req.file.buffer);
@@ -78,28 +114,40 @@ app.post(['/upload', '/api/upload'], upload.single('screenshot'), async (req, re
       data: extractedData
     });
   } catch (error) {
-    console.error('OCR Error:', error);
+    console.error('Upload Error:', error);
     res.status(500).json({ 
-      error: 'Failed to process image',
-      details: error.message 
+      success: false,
+      error: error.message || 'Failed to process image',
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
 
 // Health check endpoint
 app.get('/', (req, res) => {
-  res.send('OCR API is running');
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString()
+  });
 });
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).send('Something broke!');
+  console.error('Global Error:', err.stack);
+  res.status(500).json({
+    success: false,
+    error: 'Internal Server Error',
+    message: err.message
+  });
 });
 
+// Server configuration
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+
+// Handle server timeouts
+server.setTimeout(30000); // 30 seconds
 
 module.exports = app;
