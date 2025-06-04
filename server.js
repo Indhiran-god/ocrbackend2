@@ -8,26 +8,23 @@ const path = require('path');
 const app = express();
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: '*' // or specify your frontend URL
+}));
 app.use(express.json());
 
-// In-memory storage (replace with a proper database in production)
-const conversations = {};
-const messages = {};
-
-// Configure multer for file uploads (using memory storage for Vercel)
+// Configure multer for file uploads
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
 // OCR Function
 async function extractTextFromImage(buffer) {
-  // Save buffer to temp file (required by Tesseract)
   const tempFilePath = path.join('/tmp', `ocr-${Date.now()}.png`);
   fs.writeFileSync(tempFilePath, buffer);
   
   try {
     const { data: { text } } = await Tesseract.recognize(tempFilePath, "eng");
-    fs.unlinkSync(tempFilePath); // delete temp file
+    fs.unlinkSync(tempFilePath);
 
     const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
     const profile = {
@@ -40,62 +37,15 @@ async function extractTextFromImage(buffer) {
 
     return profile;
   } catch (error) {
-    fs.unlinkSync(tempFilePath); // ensure temp file is deleted
+    if (fs.existsSync(tempFilePath)) {
+      fs.unlinkSync(tempFilePath);
+    }
     throw error;
   }
 }
 
-// Routes
-app.post('/api/conversations', async (req, res) => {
-  try {
-    const conversation = {
-      id: Date.now().toString(),
-      startedAt: new Date(),
-      status: 'in_progress',
-      ...req.body
-    };
-    conversations[conversation.id] = conversation;
-    res.status(201).send(conversation);
-  } catch (error) {
-    res.status(400).send(error.message);
-  }
-});
-
-app.put('/api/conversations/:id', async (req, res) => {
-  try {
-    const conversation = conversations[req.params.id];
-    if (!conversation) {
-      return res.status(404).send('Conversation not found');
-    }
-    
-    Object.assign(conversation, req.body);
-    res.send(conversation);
-  } catch (error) {
-    res.status(400).send(error.message);
-  }
-});
-
-app.post('/api/messages', async (req, res) => {
-  try {
-    const message = {
-      id: Date.now().toString(),
-      timestamp: new Date(),
-      ...req.body
-    };
-    
-    if (!messages[message.conversationId]) {
-      messages[message.conversationId] = [];
-    }
-    
-    messages[message.conversationId].push(message);
-    res.status(201).send(message);
-  } catch (error) {
-    res.status(400).send(error.message);
-  }
-});
-
-// OCR Upload Route
-app.post('/api/upload', upload.single('screenshot'), async (req, res) => {
+// OCR Upload Route - Added both /upload and /api/upload for compatibility
+app.post(['/upload', '/api/upload'], upload.single('screenshot'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No file uploaded' });
@@ -109,14 +59,27 @@ app.post('/api/upload', upload.single('screenshot'), async (req, res) => {
     });
   } catch (error) {
     console.error('OCR Error:', error);
-    res.status(500).json({ error: 'Failed to process image' });
+    res.status(500).json({ 
+      error: 'Failed to process image',
+      details: error.message 
+    });
   }
 });
 
 // Health check endpoint
 app.get('/', (req, res) => {
-  res.send('Matchmaking API is running');
+  res.send('OCR API is running');
 });
 
-// Export the Express app as a serverless function
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).send('Something broke!');
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
 module.exports = app;
